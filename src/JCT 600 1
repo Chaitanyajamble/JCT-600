@@ -1,0 +1,880 @@
+"""
+=============================================================================
+JCT600 Automotive Retail — Sample Python Integration Code
+Website: https://www.jct600.co.uk
+Description: Demonstrates a Python integration layer for a JCT600-style
+             automotive retail platform, covering Vehicle Inventory,
+             Customer Management, Test Drive Bookings, Finance Quotes,
+             Service Scheduling, and Sales Order Processing.
+
+NOTE: JCT600 does not expose a public REST API. This code models the domain
+      using a realistic RESTful API design typical of modern automotive DMS
+      (Dealer Management Systems) such as those used by franchised dealers.
+      Replace BASE_URL and API_KEY with actual credentials if integrating
+      with a live DMS (e.g., Keyloop, CDK, Reynolds & Reynolds).
+=============================================================================
+"""
+
+import requests
+import json
+from datetime import datetime, date, timedelta
+from dataclasses import dataclass, field, asdict
+from typing import Optional, List
+from enum import Enum
+
+# ─────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────
+BASE_URL = "https://api.jct600.co.uk/v1"    # Replace with actual DMS API base
+API_KEY  = "YOUR_API_KEY_HERE"
+
+HEADERS = {
+    "Content-Type":  "application/json",
+    "Authorization": f"Bearer {API_KEY}",
+    "Accept":        "application/json",
+    "X-Dealer-Code": "JCT600-BRADFORD",     # Dealer group code
+}
+
+
+# ─────────────────────────────────────────────
+# ENUMS
+# ─────────────────────────────────────────────
+class VehicleCondition(str, Enum):
+    NEW        = "new"
+    USED       = "used"
+    APPROVED_USED = "approved_used"   # Manufacturer-certified pre-owned
+
+
+class FuelType(str, Enum):
+    PETROL   = "petrol"
+    DIESEL   = "diesel"
+    HYBRID   = "hybrid"
+    ELECTRIC = "electric"
+    PHEV     = "phev"   # Plug-in Hybrid
+
+
+class ServiceType(str, Enum):
+    FULL_SERVICE     = "full_service"
+    INTERIM_SERVICE  = "interim_service"
+    MOT              = "mot"
+    REPAIR           = "repair"
+    RECALL           = "recall"
+    TYRE_REPLACEMENT = "tyre_replacement"
+
+
+class FinanceType(str, Enum):
+    PCP  = "pcp"    # Personal Contract Purchase
+    HP   = "hp"     # Hire Purchase
+    PCH  = "pch"    # Personal Contract Hire (Lease)
+    CASH = "cash"
+
+
+# ─────────────────────────────────────────────
+# HELPER — Generic HTTP request handler
+# ─────────────────────────────────────────────
+def api_request(method: str, endpoint: str, payload: dict = None) -> dict:
+    """
+    Generic API request wrapper for JCT600 DMS.
+
+    Args:
+        method   : HTTP method — 'GET', 'POST', 'PUT', 'PATCH', 'DELETE'
+        endpoint : API endpoint path (e.g. '/vehicles/search')
+        payload  : Optional request body as dict
+
+    Returns:
+        Parsed JSON response as dict, or error dict.
+    """
+    url = f"{BASE_URL}{endpoint}"
+    try:
+        response = requests.request(
+            method=method.upper(),
+            url=url,
+            headers=HEADERS,
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        return {"error": f"HTTP error: {e}", "status_code": response.status_code}
+    except requests.exceptions.ConnectionError:
+        return {"error": "Connection failed. Check BASE_URL and network."}
+    except requests.exceptions.Timeout:
+        return {"error": "Request timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ═════════════════════════════════════════════
+# MODULE 1: VEHICLE INVENTORY
+# ═════════════════════════════════════════════
+@dataclass
+class Vehicle:
+    """Represents a vehicle in JCT600's stock."""
+    vin:            str                 # Vehicle Identification Number (17 chars)
+    registration:   str                 # UK registration plate, e.g. 'AB12 CDE'
+    make:           str                 # e.g. 'BMW', 'Volkswagen', 'Audi'
+    model:          str                 # e.g. '3 Series', 'Golf', 'A4'
+    variant:        str                 # Trim level, e.g. 'Sport', 'SE', 'M Sport'
+    year:           int
+    colour:         str
+    mileage:        int                 # Miles
+    fuel_type:      FuelType
+    transmission:   str                 # 'manual' or 'automatic'
+    condition:      VehicleCondition
+    list_price:     float               # OTR (On The Road) price in GBP
+    offer_price:    float               # Discounted/offer price
+    branch:         str                 # Dealership location, e.g. 'Bradford', 'Leeds'
+    co2_gkm:        int                 # CO2 emissions g/km
+    mpg:            float               # Official MPG
+    mot_expiry:     Optional[str] = None
+    service_history: bool = True
+
+
+class VehicleInventory:
+    """JCT600 Vehicle Inventory management — search, add, update stock."""
+
+    def add_vehicle(self, vehicle: Vehicle) -> dict:
+        """Add a new vehicle to JCT600's stock system."""
+        payload = asdict(vehicle)
+        # Convert Enum values to strings for JSON serialisation
+        payload["fuel_type"]  = vehicle.fuel_type.value
+        payload["condition"]  = vehicle.condition.value
+        result = api_request("POST", "/vehicles", payload)
+        if "vehicle_id" in result:
+            print(f"[INVENTORY] Vehicle added: {vehicle.year} {vehicle.make} "
+                  f"{vehicle.model} ({vehicle.registration}) | "
+                  f"Stock ID: {result['vehicle_id']} | £{vehicle.offer_price:,.0f}")
+        return result
+
+    def search_vehicles(
+        self,
+        make: str = None,
+        model: str = None,
+        fuel_type: str = None,
+        condition: str = None,
+        max_price: float = None,
+        max_mileage: int = None,
+        branch: str = None,
+    ) -> List[dict]:
+        """
+        Search the vehicle stock with optional filters.
+
+        Returns:
+            List of matching vehicle dicts.
+        """
+        params = []
+        if make:        params.append(f"make={make}")
+        if model:       params.append(f"model={model}")
+        if fuel_type:   params.append(f"fuel_type={fuel_type}")
+        if condition:   params.append(f"condition={condition}")
+        if max_price:   params.append(f"max_price={max_price}")
+        if max_mileage: params.append(f"max_mileage={max_mileage}")
+        if branch:      params.append(f"branch={branch}")
+
+        query   = "?" + "&".join(params) if params else ""
+        result  = api_request("GET", f"/vehicles/search{query}")
+        vehicles = result.get("vehicles", [])
+
+        print(f"[INVENTORY] Search returned {len(vehicles)} vehicle(s):")
+        for v in vehicles[:5]:
+            print(f"  • {v.get('year')} {v.get('make')} {v.get('model')} "
+                  f"| {v.get('mileage', 0):,} miles | £{v.get('offer_price', 0):,.0f} "
+                  f"| {v.get('branch')}")
+        return vehicles
+
+    def get_vehicle_details(self, vehicle_id: str) -> dict:
+        """Retrieve full details of a specific vehicle by stock ID."""
+        result = api_request("GET", f"/vehicles/{vehicle_id}")
+        if "vin" in result:
+            print(f"[INVENTORY] Vehicle {vehicle_id}: "
+                  f"{result['year']} {result['make']} {result['model']} "
+                  f"| VIN: {result['vin']} | £{result.get('offer_price', 0):,.0f}")
+        return result
+
+    def update_vehicle_price(self, vehicle_id: str, new_price: float, reason: str) -> dict:
+        """Update the offer price of a vehicle."""
+        payload = {
+            "offer_price":    new_price,
+            "price_change_reason": reason,
+            "updated_at":     str(datetime.now()),
+        }
+        result = api_request("PATCH", f"/vehicles/{vehicle_id}/price", payload)
+        print(f"[INVENTORY] Price updated for {vehicle_id}: £{new_price:,.0f} ({reason})")
+        return result
+
+    def mark_as_sold(self, vehicle_id: str, sale_date: str) -> dict:
+        """Mark a vehicle as sold and remove from available stock."""
+        payload = {"status": "sold", "sale_date": sale_date}
+        result  = api_request("PATCH", f"/vehicles/{vehicle_id}/status", payload)
+        print(f"[INVENTORY] Vehicle {vehicle_id} marked as SOLD on {sale_date}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 2: CUSTOMER MANAGEMENT
+# ═════════════════════════════════════════════
+@dataclass
+class Customer:
+    """Represents a JCT600 customer (individual or business)."""
+    title:         str    # 'Mr', 'Mrs', 'Ms', 'Dr'
+    first_name:    str
+    last_name:     str
+    email:         str
+    mobile:        str
+    address_line1: str
+    city:          str
+    postcode:      str    # UK postcode, e.g. 'BD1 1AA'
+    date_of_birth: str    # Required for finance applications
+    gdpr_consent:  bool   # GDPR marketing consent
+    customer_type: str = "individual"   # 'individual' or 'business'
+    company_name:  str = ""
+    driving_licence: str = ""
+
+
+class CustomerManagement:
+    """JCT600 Customer Relationship Management."""
+
+    def create_customer(self, customer: Customer) -> dict:
+        """Register a new customer in the DMS."""
+        result = api_request("POST", "/customers", asdict(customer))
+        if "customer_id" in result:
+            print(f"[CRM] Customer created: {customer.title} {customer.first_name} "
+                  f"{customer.last_name} | ID: {result['customer_id']} | "
+                  f"{customer.postcode}")
+        return result
+
+    def search_customers(self, query: str) -> List[dict]:
+        """
+        Search customers by name, email, or postcode.
+
+        Args:
+            query : Search string
+        """
+        result    = api_request("GET", f"/customers/search?q={query}")
+        customers = result.get("customers", [])
+        print(f"[CRM] Search '{query}': {len(customers)} customer(s) found")
+        return customers
+
+    def get_customer_history(self, customer_id: str) -> dict:
+        """
+        Retrieve a customer's full interaction history including
+        purchases, service visits, and enquiries.
+        """
+        result = api_request("GET", f"/customers/{customer_id}/history")
+        h = result.get("history", {})
+        print(f"[CRM] Customer {customer_id} history: "
+              f"Purchases={h.get('purchases', 0)} | "
+              f"Service Visits={h.get('service_visits', 0)} | "
+              f"Test Drives={h.get('test_drives', 0)} | "
+              f"Lifetime Value=£{h.get('lifetime_value', 0):,.0f}")
+        return result
+
+    def update_gdpr_preferences(self, customer_id: str, consent: bool) -> dict:
+        """Update a customer's GDPR marketing consent preferences."""
+        payload = {
+            "gdpr_consent":  consent,
+            "consent_date":  str(date.today()),
+        }
+        result = api_request("PATCH", f"/customers/{customer_id}/gdpr", payload)
+        status = "Opted IN" if consent else "Opted OUT"
+        print(f"[CRM] Customer {customer_id} GDPR marketing: {status}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 3: TEST DRIVE BOOKING
+# ═════════════════════════════════════════════
+@dataclass
+class TestDriveBooking:
+    """Represents a test drive appointment."""
+    customer_id:  str
+    vehicle_id:   str
+    branch:       str
+    preferred_date: str    # 'YYYY-MM-DD'
+    preferred_time: str    # 'HH:MM'
+    duration_mins: int = 30
+    notes:        str = ""
+
+
+class TestDriveManagement:
+    """Manage test drive bookings at JCT600 branches."""
+
+    def book_test_drive(self, booking: TestDriveBooking) -> dict:
+        """Schedule a test drive for a customer."""
+        result = api_request("POST", "/test-drives/book", asdict(booking))
+        if "booking_ref" in result:
+            print(f"[TEST DRIVE] Booked: Ref={result['booking_ref']} | "
+                  f"Customer={booking.customer_id} | Vehicle={booking.vehicle_id} | "
+                  f"{booking.preferred_date} @ {booking.preferred_time} | "
+                  f"Branch={booking.branch}")
+        return result
+
+    def get_available_slots(self, branch: str, date: str) -> List[dict]:
+        """
+        Get available test drive time slots at a branch for a given date.
+
+        Args:
+            branch : Branch name or code
+            date   : Date string 'YYYY-MM-DD'
+        """
+        result = api_request("GET", f"/test-drives/slots?branch={branch}&date={date}")
+        slots  = result.get("slots", [])
+        print(f"[TEST DRIVE] Available slots at {branch} on {date}: {len(slots)}")
+        for slot in slots:
+            print(f"  • {slot['time']} — {slot.get('vehicle_available', 'Any')} "
+                  f"({'Available' if slot.get('available') else 'Booked'})")
+        return slots
+
+    def cancel_test_drive(self, booking_ref: str, reason: str) -> dict:
+        """Cancel an existing test drive booking."""
+        payload = {"reason": reason, "cancelled_at": str(datetime.now())}
+        result  = api_request("DELETE", f"/test-drives/{booking_ref}", payload)
+        print(f"[TEST DRIVE] Booking {booking_ref} cancelled: {reason}")
+        return result
+
+    def complete_test_drive(self, booking_ref: str, feedback: str, interested: bool) -> dict:
+        """Record test drive completion and customer feedback."""
+        payload = {
+            "status":         "completed",
+            "customer_feedback": feedback,
+            "interested_in_purchase": interested,
+            "completed_at":   str(datetime.now()),
+        }
+        result = api_request("PATCH", f"/test-drives/{booking_ref}/complete", payload)
+        print(f"[TEST DRIVE] {booking_ref} completed | "
+              f"Interested in purchase: {'Yes' if interested else 'No'}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 4: FINANCE QUOTATION
+# ═════════════════════════════════════════════
+@dataclass
+class FinanceQuote:
+    """
+    Input parameters for generating a vehicle finance quote.
+    Supports PCP, HP, and PCH (lease) products.
+    """
+    customer_id:    str
+    vehicle_id:     str
+    finance_type:   FinanceType
+    vehicle_price:  float      # Agreed selling price in GBP
+    deposit:        float      # Customer deposit
+    term_months:    int        # e.g. 24, 36, 48, 60
+    annual_mileage: int        # Required for PCP/PCH
+    part_exchange_value: float = 0.0   # Part-ex vehicle value
+    part_exchange_outstanding: float = 0.0   # Finance outstanding on PX
+
+
+class FinanceQuotation:
+    """Generate and manage vehicle finance quotes for JCT600 customers."""
+
+    def generate_quote(self, quote: FinanceQuote) -> dict:
+        """
+        Request a finance quote from the lender (e.g. BMW Financial Services,
+        Volkswagen Financial Services, Black Horse).
+        """
+        payload = asdict(quote)
+        payload["finance_type"] = quote.finance_type.value
+        result = api_request("POST", "/finance/quotes", payload)
+
+        if "quote_id" in result:
+            r = result
+            print(f"[FINANCE] {quote.finance_type.value.upper()} Quote generated:")
+            print(f"  Vehicle Price : £{quote.vehicle_price:,.2f}")
+            print(f"  Deposit       : £{quote.deposit:,.2f}")
+            print(f"  Term          : {quote.term_months} months")
+            print(f"  Monthly Payment: £{r.get('monthly_payment', 0):,.2f}")
+            print(f"  APR           : {r.get('apr', 0):.1f}%")
+            print(f"  Total Cost    : £{r.get('total_cost', 0):,.2f}")
+            if quote.finance_type == FinanceType.PCP:
+                print(f"  Final Payment  : £{r.get('optional_final_payment', 0):,.2f} (GFV)")
+            print(f"  Quote ID       : {r['quote_id']}")
+        return result
+
+    def compare_finance_options(self, vehicle_id: str, vehicle_price: float,
+                                 deposit: float, term_months: int) -> List[dict]:
+        """
+        Generate and compare PCP, HP, and PCH quotes side by side.
+
+        Returns:
+            List of quote dicts for each product type.
+        """
+        print(f"[FINANCE] Comparing options for Vehicle {vehicle_id} "
+              f"| Price £{vehicle_price:,.0f} | Deposit £{deposit:,.0f} | {term_months}mo")
+        quotes = []
+        for ft in [FinanceType.PCP, FinanceType.HP, FinanceType.PCH]:
+            quote = FinanceQuote(
+                customer_id="COMP-QUOTE",
+                vehicle_id=vehicle_id,
+                finance_type=ft,
+                vehicle_price=vehicle_price,
+                deposit=deposit,
+                term_months=term_months,
+                annual_mileage=10000,
+            )
+            result = self.generate_quote(quote)
+            result["finance_type"] = ft.value
+            quotes.append(result)
+        return quotes
+
+    def submit_finance_application(self, quote_id: str, customer_id: str) -> dict:
+        """Submit a finance application based on an accepted quote."""
+        payload = {
+            "quote_id":    quote_id,
+            "customer_id": customer_id,
+            "submitted_at": str(datetime.now()),
+        }
+        result = api_request("POST", "/finance/applications", payload)
+        print(f"[FINANCE] Application submitted: "
+              f"App ID={result.get('application_id')} | "
+              f"Status={result.get('decision', 'Pending')}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 5: SERVICE & AFTERSALES
+# ═════════════════════════════════════════════
+@dataclass
+class ServiceBooking:
+    """Represents a vehicle service booking."""
+    customer_id:    str
+    vehicle_reg:    str
+    service_type:   ServiceType
+    branch:         str
+    preferred_date: str
+    preferred_time: str
+    courtesy_car:   bool = False
+    collection_delivery: bool = False   # Collect & return service
+    customer_notes: str = ""
+    mileage:        int = 0
+
+
+class ServiceAftersales:
+    """JCT600 Service & Aftersales — MOT, servicing, repairs, and tyres."""
+
+    def book_service(self, booking: ServiceBooking) -> dict:
+        """Book a vehicle service appointment."""
+        payload = asdict(booking)
+        payload["service_type"] = booking.service_type.value
+        result = api_request("POST", "/service/bookings", payload)
+        if "booking_ref" in result:
+            print(f"[SERVICE] Booking confirmed: Ref={result['booking_ref']} | "
+                  f"Reg={booking.vehicle_reg} | "
+                  f"Type={booking.service_type.value.replace('_', ' ').title()} | "
+                  f"{booking.preferred_date} @ {booking.preferred_time} | "
+                  f"Branch={booking.branch}")
+            if booking.courtesy_car:
+                print(f"  ↳ Courtesy car requested: {'Confirmed' if result.get('courtesy_car_confirmed') else 'Subject to availability'}")
+        return result
+
+    def get_mot_reminders(self, days_ahead: int = 30) -> List[dict]:
+        """
+        Retrieve customers with MOT due within the specified number of days.
+        Used for proactive outreach and re-booking campaigns.
+
+        Args:
+            days_ahead : Look-ahead window in days
+        """
+        result    = api_request("GET", f"/service/mot-reminders?days={days_ahead}")
+        reminders = result.get("reminders", [])
+        print(f"[SERVICE] MOT due in next {days_ahead} days: {len(reminders)} vehicle(s)")
+        for r in reminders[:5]:
+            print(f"  • {r.get('vehicle_reg')} | {r.get('customer_name')} | "
+                  f"MOT Expiry: {r.get('mot_expiry')} | "
+                  f"Branch: {r.get('last_branch')}")
+        return reminders
+
+    def create_job_card(self, booking_ref: str, technician_id: str,
+                         additional_work: List[str] = None) -> dict:
+        """
+        Create a workshop job card when the vehicle arrives for service.
+
+        Args:
+            booking_ref      : Service booking reference
+            technician_id    : Assigned technician ID
+            additional_work  : Any extra work identified on vehicle check-in
+        """
+        payload = {
+            "booking_ref":    booking_ref,
+            "technician_id":  technician_id,
+            "check_in_time":  str(datetime.now()),
+            "additional_work": additional_work or [],
+        }
+        result = api_request("POST", "/service/job-cards", payload)
+        print(f"[SERVICE] Job card created: {result.get('job_card_number')} | "
+              f"Technician: {technician_id}")
+        return result
+
+    def complete_service(self, job_card_number: str, work_done: str,
+                          labour_cost: float, parts_cost: float) -> dict:
+        """Record service completion and generate invoice."""
+        payload = {
+            "job_card_number": job_card_number,
+            "work_done":       work_done,
+            "labour_cost":     labour_cost,
+            "parts_cost":      parts_cost,
+            "vat_rate":        20.0,   # UK standard VAT
+            "completed_at":    str(datetime.now()),
+        }
+        total_ex_vat = labour_cost + parts_cost
+        total_inc_vat = total_ex_vat * 1.20
+        result = api_request("POST", f"/service/job-cards/{job_card_number}/complete", payload)
+        print(f"[SERVICE] Job {job_card_number} completed: "
+              f"Labour=£{labour_cost:,.2f} | Parts=£{parts_cost:,.2f} | "
+              f"Total (inc. VAT)=£{total_inc_vat:,.2f} | "
+              f"Invoice: {result.get('invoice_number')}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 6: SALES ORDER PROCESSING
+# ═════════════════════════════════════════════
+@dataclass
+class VehicleSaleOrder:
+    """Represents a complete vehicle sale transaction."""
+    customer_id:        str
+    vehicle_id:         str
+    sale_price:         float
+    finance_quote_id:   Optional[str]     # None if cash purchase
+    finance_type:       FinanceType
+    salesperson_id:     str
+    branch:             str
+    part_exchange_reg:  Optional[str] = None
+    part_exchange_value: float = 0.0
+    accessories:        List[dict] = field(default_factory=list)  # [{name, price}]
+    warranty_package:   str = "standard"   # 'standard', 'extended_1yr', 'extended_3yr'
+    delivery_date:      str = ""
+
+    @property
+    def accessories_total(self) -> float:
+        return sum(a.get("price", 0) for a in self.accessories)
+
+    @property
+    def total_order_value(self) -> float:
+        return self.sale_price + self.accessories_total
+
+    @property
+    def net_deposit_needed(self) -> float:
+        return max(0, self.total_order_value - self.part_exchange_value)
+
+
+class SalesOrderProcessing:
+    """JCT600 Sales Order Processing — from deal to delivery."""
+
+    def create_sale_order(self, order: VehicleSaleOrder) -> dict:
+        """
+        Create a vehicle sale order (deal sheet).
+
+        Covers cash, PCP, HP, and PCH transactions.
+        """
+        payload = {
+            "customer_id":        order.customer_id,
+            "vehicle_id":         order.vehicle_id,
+            "sale_price":         order.sale_price,
+            "finance_quote_id":   order.finance_quote_id,
+            "finance_type":       order.finance_type.value,
+            "salesperson_id":     order.salesperson_id,
+            "branch":             order.branch,
+            "part_exchange_reg":  order.part_exchange_reg,
+            "part_exchange_value": order.part_exchange_value,
+            "accessories":        order.accessories,
+            "accessories_total":  order.accessories_total,
+            "warranty_package":   order.warranty_package,
+            "total_order_value":  order.total_order_value,
+            "delivery_date":      order.delivery_date,
+            "order_date":         str(date.today()),
+        }
+        result = api_request("POST", "/sales/orders", payload)
+        if "order_id" in result:
+            print(f"[SALES] Order created: ID={result['order_id']} | "
+                  f"Vehicle={order.vehicle_id} | Customer={order.customer_id} | "
+                  f"Total=£{order.total_order_value:,.2f} | "
+                  f"Finance={order.finance_type.value.upper()}")
+        return result
+
+    def get_order_status(self, order_id: str) -> dict:
+        """Check the current status of a sale order."""
+        result = api_request("GET", f"/sales/orders/{order_id}/status")
+        print(f"[SALES] Order {order_id} Status: {result.get('status')} | "
+              f"Stage: {result.get('stage')} | "
+              f"Delivery: {result.get('expected_delivery', 'TBC')}")
+        return result
+
+    def schedule_vehicle_delivery(self, order_id: str, delivery_date: str,
+                                   delivery_time: str, driver_id: str) -> dict:
+        """Schedule the final vehicle handover/delivery."""
+        payload = {
+            "delivery_date": delivery_date,
+            "delivery_time": delivery_time,
+            "driver_id":     driver_id,
+        }
+        result = api_request("POST", f"/sales/orders/{order_id}/delivery", payload)
+        print(f"[SALES] Delivery scheduled: Order {order_id} | "
+              f"{delivery_date} @ {delivery_time} | Driver: {driver_id}")
+        return result
+
+    def complete_handover(self, order_id: str, customer_signature: str,
+                           handover_notes: str) -> dict:
+        """
+        Record vehicle handover completion — customer signs and takes delivery.
+
+        Args:
+            order_id           : Sale order ID
+            customer_signature : Base64-encoded signature or digital ref
+            handover_notes     : Handover checklist notes
+        """
+        payload = {
+            "customer_signature": customer_signature,
+            "handover_notes":    handover_notes,
+            "handover_date":     str(date.today()),
+            "status":            "delivered",
+        }
+        result = api_request("POST", f"/sales/orders/{order_id}/handover", payload)
+        print(f"[SALES] Handover complete for order {order_id} — "
+              f"Vehicle delivered to customer.")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 7: BRANCH & REPORTING
+# ═════════════════════════════════════════════
+class BranchReporting:
+    """JCT600 multi-branch performance reporting."""
+
+    BRANCHES = [
+        "Bradford", "Leeds", "Sheffield", "York",
+        "Harrogate", "Huddersfield", "Rotherham",
+    ]
+
+    def get_branch_sales_summary(self, branch: str, month: int, year: int) -> dict:
+        """Monthly sales summary for a branch."""
+        result = api_request("GET",
+            f"/reporting/sales?branch={branch}&month={month}&year={year}")
+        if "summary" in result:
+            s = result["summary"]
+            print(f"[REPORT] {branch} Sales {month}/{year}: "
+                  f"New={s.get('new_vehicles_sold', 0)} | "
+                  f"Used={s.get('used_vehicles_sold', 0)} | "
+                  f"Revenue=£{s.get('total_revenue', 0):,.0f} | "
+                  f"Finance Penetration={s.get('finance_penetration', 0):.0f}%")
+        return result
+
+    def get_group_dashboard(self) -> dict:
+        """Retrieve group-wide KPIs across all JCT600 branches."""
+        result = api_request("GET", "/reporting/group-dashboard")
+        if "kpis" in result:
+            k = result["kpis"]
+            print(f"[REPORT] JCT600 Group KPIs:")
+            print(f"  • Total Vehicles Sold (MTD)  : {k.get('vehicles_sold_mtd', 0)}")
+            print(f"  • Total Revenue (MTD)        : £{k.get('revenue_mtd', 0):,.0f}")
+            print(f"  • Finance Penetration        : {k.get('finance_penetration', 0):.0f}%")
+            print(f"  • Service Jobs (MTD)         : {k.get('service_jobs_mtd', 0)}")
+            print(f"  • Customer Satisfaction (NPS): {k.get('nps_score', 0)}")
+            print(f"  • Active Test Drive Bookings : {k.get('test_drive_bookings', 0)}")
+        return result
+
+    def get_stock_turn_report(self, branch: str = None) -> dict:
+        """
+        Analyse stock turn rate — how many days vehicles are sitting unsold.
+
+        Args:
+            branch : Specific branch or None for group-wide
+        """
+        endpoint = "/reporting/stock-turn"
+        if branch:
+            endpoint += f"?branch={branch}"
+        result = api_request("GET", endpoint)
+        if "analysis" in result:
+            a = result["analysis"]
+            print(f"[REPORT] Stock Turn{f' ({branch})' if branch else ' (Group)'}:")
+            print(f"  • Avg Days in Stock (New)  : {a.get('avg_days_new', 0):.0f} days")
+            print(f"  • Avg Days in Stock (Used) : {a.get('avg_days_used', 0):.0f} days")
+            print(f"  • Vehicles > 60 days       : {a.get('aged_stock_count', 0)}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# DEMO RUNNER — Illustrates all modules
+# ═════════════════════════════════════════════
+def run_jct600_demo():
+    """
+    Demonstrates all major JCT600 automotive retail modules with sample data.
+    Replace placeholder IDs and values with real data from your DMS.
+    """
+    print("=" * 60)
+    print("  JCT600 Automotive Retail — Python Integration Demo")
+    print("  https://www.jct600.co.uk")
+    print("=" * 60)
+
+    # ── 1. Vehicle Inventory ───────────────────
+    print("\n[1] Vehicle Inventory")
+    inventory = VehicleInventory()
+
+    new_car = Vehicle(
+        vin="WBAJB9C51JB083456",
+        registration="YP26 ABC",
+        make="BMW",
+        model="3 Series",
+        variant="M Sport",
+        year=2026,
+        colour="Alpine White",
+        mileage=5,
+        fuel_type=FuelType.HYBRID,
+        transmission="automatic",
+        condition=VehicleCondition.NEW,
+        list_price=47995.00,
+        offer_price=45995.00,
+        branch="Bradford",
+        co2_gkm=32,
+        mpg=188.3,
+        service_history=True,
+    )
+    stock_result = inventory.add_vehicle(new_car)
+
+    # Search for used electric vehicles under £30k
+    inventory.search_vehicles(
+        fuel_type=FuelType.ELECTRIC.value,
+        condition=VehicleCondition.USED.value,
+        max_price=30000,
+        branch="Leeds",
+    )
+
+    # ── 2. Customer Management ─────────────────
+    print("\n[2] Customer Management")
+    crm = CustomerManagement()
+
+    customer = Customer(
+        title="Mr",
+        first_name="James",
+        last_name="Thompson",
+        email="james.thompson@email.co.uk",
+        mobile="07712345678",
+        address_line1="14 Oak Street",
+        city="Bradford",
+        postcode="BD3 7AB",
+        date_of_birth="1985-06-15",
+        gdpr_consent=True,
+    )
+    cust_result = crm.create_customer(customer)
+    customer_id = cust_result.get("customer_id", "CUST-DEMO-001")
+
+    crm.search_customers("Thompson BD3")
+    crm.get_customer_history(customer_id)
+
+    # ── 3. Test Drive Booking ──────────────────
+    print("\n[3] Test Drive Booking")
+    test_drives = TestDriveManagement()
+
+    test_drives.get_available_slots("Bradford", "2026-06-20")
+    booking = TestDriveBooking(
+        customer_id=customer_id,
+        vehicle_id=stock_result.get("vehicle_id", "VEH-001"),
+        branch="Bradford",
+        preferred_date="2026-06-20",
+        preferred_time="11:00",
+        duration_mins=45,
+        notes="Customer interested in hybrid, commutes 30 miles/day",
+    )
+    td_result = test_drives.book_test_drive(booking)
+
+    # ── 4. Finance Quote ───────────────────────
+    print("\n[4] Finance Quotation")
+    finance = FinanceQuotation()
+
+    # PCP quote — most popular product in UK automotive retail
+    pcp_quote = FinanceQuote(
+        customer_id=customer_id,
+        vehicle_id=stock_result.get("vehicle_id", "VEH-001"),
+        finance_type=FinanceType.PCP,
+        vehicle_price=45995.00,
+        deposit=5000.00,
+        term_months=48,
+        annual_mileage=10000,
+        part_exchange_value=12000.00,
+    )
+    quote_result = finance.generate_quote(pcp_quote)
+
+    # Also compare all product types side by side
+    finance.compare_finance_options(
+        vehicle_id=stock_result.get("vehicle_id", "VEH-001"),
+        vehicle_price=45995.00,
+        deposit=5000.00,
+        term_months=36,
+    )
+
+    # ── 5. Sales Order ─────────────────────────
+    print("\n[5] Sales Order Processing")
+    sales = SalesOrderProcessing()
+
+    order = VehicleSaleOrder(
+        customer_id=customer_id,
+        vehicle_id=stock_result.get("vehicle_id", "VEH-001"),
+        sale_price=45995.00,
+        finance_quote_id=quote_result.get("quote_id"),
+        finance_type=FinanceType.PCP,
+        salesperson_id="SP-0042",
+        branch="Bradford",
+        part_exchange_reg="OE19 XYZ",
+        part_exchange_value=12000.00,
+        accessories=[
+            {"name": "Roof Bars",      "price": 395.00},
+            {"name": "Floor Mats Set", "price": 145.00},
+        ],
+        warranty_package="extended_3yr",
+        delivery_date="2026-06-28",
+    )
+    order_result = sales.create_sale_order(order)
+    if "order_id" in order_result:
+        sales.get_order_status(order_result["order_id"])
+        sales.schedule_vehicle_delivery(
+            order_result["order_id"], "2026-06-28", "10:30", "DRV-007"
+        )
+
+    # ── 6. Service & Aftersales ────────────────
+    print("\n[6] Service & Aftersales")
+    service = ServiceAftersales()
+
+    svc_booking = ServiceBooking(
+        customer_id="CUST-OLD-100",
+        vehicle_reg="BD18 XYZ",
+        service_type=ServiceType.FULL_SERVICE,
+        branch="Bradford",
+        preferred_date="2026-06-18",
+        preferred_time="08:30",
+        courtesy_car=True,
+        mileage=42150,
+        customer_notes="Also check front brake pads — slight squeal when braking",
+    )
+    svc_result = service.book_service(svc_booking)
+    service.get_mot_reminders(days_ahead=30)
+
+    if "booking_ref" in svc_result:
+        job_result = service.create_job_card(
+            svc_result["booking_ref"],
+            technician_id="TECH-015",
+            additional_work=["Replace cabin air filter", "Top up AdBlue"],
+        )
+        if "job_card_number" in job_result:
+            service.complete_service(
+                job_result["job_card_number"],
+                work_done="Full service completed. Replaced brake pads. Replaced cabin filter.",
+                labour_cost=285.00,
+                parts_cost=187.50,
+            )
+
+    # ── 7. Branch Reporting ────────────────────
+    print("\n[7] Branch & Group Reporting")
+    reporting = BranchReporting()
+    reporting.get_branch_sales_summary("Bradford", 6, 2026)
+    reporting.get_group_dashboard()
+    reporting.get_stock_turn_report()
+
+    print("\n" + "=" * 60)
+    print("  JCT600 Demo Complete.")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    run_jct600_demo()
