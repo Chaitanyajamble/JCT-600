@@ -1,0 +1,655 @@
+# ================================================================
+#  JCT600 Car Dealership — Python FastAPI Backend
+#  Features: Vehicle Listings, Test Drive Booking, Service Booking,
+#            Part-Exchange Valuation, Finance Calculator, Enquiries
+# ================================================================
+
+# requirements.txt
+# fastapi==0.111.0
+# uvicorn==0.29.0
+# sqlalchemy==2.0.30
+# alembic==1.13.1
+# pydantic==2.7.1
+# pydantic-settings==2.2.1
+# psycopg2-binary==2.9.9
+# python-jose[cryptography]==3.3.0
+# passlib[bcrypt]==1.7.4
+# python-multipart==0.0.9
+# pytest==8.2.0
+# httpx==0.27.0
+
+# ================================================================
+# PROJECT STRUCTURE
+# ================================================================
+# jct600/
+# ├── main.py
+# ├── database.py
+# ├── models/
+# │   ├── vehicle.py
+# │   ├── booking.py
+# │   ├── customer.py
+# │   └── finance.py
+# ├── schemas/
+# │   ├── vehicle.py
+# │   ├── booking.py
+# │   └── finance.py
+# ├── routers/
+# │   ├── vehicles.py
+# │   ├── bookings.py
+# │   ├── service.py
+# │   ├── finance.py
+# │   └── auth.py
+# ├── tests/
+# │   └── test_vehicles.py
+# └── requirements.txt
+
+# ================================================================
+# database.py
+# ================================================================
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import os
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://jct_user:jct_pass@localhost/jct600")
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# ================================================================
+# models/vehicle.py
+# ================================================================
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, Enum
+from sqlalchemy.orm import relationship
+from database import Base
+from datetime import datetime
+import enum
+
+class FuelType(str, enum.Enum):
+    PETROL = "petrol"
+    DIESEL = "diesel"
+    ELECTRIC = "electric"
+    HYBRID = "hybrid"
+
+class VehicleStatus(str, enum.Enum):
+    AVAILABLE = "available"
+    RESERVED = "reserved"
+    SOLD = "sold"
+
+class Vehicle(Base):
+    __tablename__ = "vehicles"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    make          = Column(String(100), nullable=False)      # e.g. Audi
+    model         = Column(String(100), nullable=False)      # e.g. A4
+    year          = Column(Integer, nullable=False)
+    variant       = Column(String(100))                      # e.g. Sport S Line
+    colour        = Column(String(50))
+    mileage       = Column(Integer)                          # miles
+    price         = Column(Float, nullable=False)            # GBP
+    monthly_price = Column(Float)                            # finance monthly
+    fuel_type     = Column(Enum(FuelType))
+    transmission  = Column(String(50))                       # Manual / Auto
+    engine_size   = Column(String(20))                       # e.g. 2.0L
+    body_type     = Column(String(50))                       # Saloon, SUV etc.
+    doors         = Column(Integer)
+    seats         = Column(Integer)
+    is_new        = Column(Boolean, default=False)
+    dealership    = Column(String(150))                      # Leeds, Bradford etc.
+    description   = Column(Text)
+    image_url     = Column(String(300))
+    status        = Column(Enum(VehicleStatus), default=VehicleStatus.AVAILABLE)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+
+    bookings      = relationship("TestDriveBooking", back_populates="vehicle")
+
+
+# ================================================================
+# models/booking.py
+# ================================================================
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, Text
+from sqlalchemy.orm import relationship
+from database import Base
+from datetime import datetime
+import enum
+
+class BookingStatus(str, enum.Enum):
+    PENDING   = "pending"
+    CONFIRMED = "confirmed"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+class TestDriveBooking(Base):
+    __tablename__ = "test_drive_bookings"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    vehicle_id      = Column(Integer, ForeignKey("vehicles.id"))
+    customer_name   = Column(String(150), nullable=False)
+    customer_email  = Column(String(150), nullable=False)
+    customer_phone  = Column(String(30), nullable=False)
+    preferred_date  = Column(DateTime, nullable=False)
+    dealership      = Column(String(150))
+    status          = Column(Enum(BookingStatus), default=BookingStatus.PENDING)
+    notes           = Column(Text)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+
+    vehicle         = relationship("Vehicle", back_populates="bookings")
+
+
+class ServiceBooking(Base):
+    __tablename__ = "service_bookings"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    customer_name   = Column(String(150), nullable=False)
+    customer_email  = Column(String(150), nullable=False)
+    customer_phone  = Column(String(30), nullable=False)
+    vehicle_reg     = Column(String(20), nullable=False)    # registration plate
+    vehicle_make    = Column(String(100))
+    vehicle_model   = Column(String(100))
+    service_type    = Column(String(100))                   # MOT, Service, Repair
+    preferred_date  = Column(DateTime, nullable=False)
+    dealership      = Column(String(150))
+    status          = Column(Enum(BookingStatus), default=BookingStatus.PENDING)
+    notes           = Column(Text)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+
+
+# ================================================================
+# models/finance.py
+# ================================================================
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text
+from database import Base
+from datetime import datetime
+
+class PartExchangeValuation(Base):
+    __tablename__ = "part_exchange_valuations"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    customer_name   = Column(String(150))
+    customer_email  = Column(String(150))
+    vehicle_reg     = Column(String(20), nullable=False)
+    make            = Column(String(100))
+    model           = Column(String(100))
+    year            = Column(Integer)
+    mileage         = Column(Integer)
+    condition       = Column(String(50))     # Excellent, Good, Fair, Poor
+    estimated_value = Column(Float)          # GBP - calculated estimate
+    notes           = Column(Text)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+
+
+class FinanceApplication(Base):
+    __tablename__ = "finance_applications"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    customer_name   = Column(String(150), nullable=False)
+    customer_email  = Column(String(150), nullable=False)
+    customer_phone  = Column(String(30))
+    vehicle_id      = Column(Integer, ForeignKey("vehicles.id"))
+    vehicle_price   = Column(Float, nullable=False)
+    deposit         = Column(Float, default=0)
+    term_months     = Column(Integer)        # 24, 36, 48, 60
+    annual_rate     = Column(Float)          # APR %
+    monthly_payment = Column(Float)          # calculated
+    employment_status = Column(String(100))
+    annual_income   = Column(Float)
+    status          = Column(String(50), default="submitted")
+    created_at      = Column(DateTime, default=datetime.utcnow)
+
+
+# ================================================================
+# schemas/vehicle.py
+# ================================================================
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+from enum import Enum
+
+class FuelTypeEnum(str, Enum):
+    PETROL   = "petrol"
+    DIESEL   = "diesel"
+    ELECTRIC = "electric"
+    HYBRID   = "hybrid"
+
+class VehicleCreate(BaseModel):
+    make: str
+    model: str
+    year: int
+    variant: Optional[str] = None
+    colour: Optional[str] = None
+    mileage: Optional[int] = None
+    price: float
+    monthly_price: Optional[float] = None
+    fuel_type: Optional[FuelTypeEnum] = None
+    transmission: Optional[str] = None
+    engine_size: Optional[str] = None
+    body_type: Optional[str] = None
+    doors: Optional[int] = None
+    seats: Optional[int] = None
+    is_new: bool = False
+    dealership: Optional[str] = None
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+
+class VehicleResponse(VehicleCreate):
+    id: int
+    status: str
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class VehicleFilter(BaseModel):
+    make: Optional[str] = None
+    body_type: Optional[str] = None
+    fuel_type: Optional[str] = None
+    min_price: Optional[float] = None
+    max_price: Optional[float] = None
+    max_mileage: Optional[int] = None
+    is_new: Optional[bool] = None
+    dealership: Optional[str] = None
+
+
+# ================================================================
+# schemas/booking.py
+# ================================================================
+from pydantic import BaseModel, EmailStr
+from datetime import datetime
+from typing import Optional
+
+class TestDriveRequest(BaseModel):
+    vehicle_id: int
+    customer_name: str
+    customer_email: EmailStr
+    customer_phone: str
+    preferred_date: datetime
+    dealership: Optional[str] = None
+    notes: Optional[str] = None
+
+class ServiceBookingRequest(BaseModel):
+    customer_name: str
+    customer_email: EmailStr
+    customer_phone: str
+    vehicle_reg: str
+    vehicle_make: Optional[str] = None
+    vehicle_model: Optional[str] = None
+    service_type: str   # "MOT" | "Full Service" | "Interim Service" | "Repair"
+    preferred_date: datetime
+    dealership: Optional[str] = None
+    notes: Optional[str] = None
+
+class BookingResponse(BaseModel):
+    id: int
+    status: str
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+
+# ================================================================
+# schemas/finance.py
+# ================================================================
+from pydantic import BaseModel, EmailStr
+from typing import Optional
+
+class PartExchangeRequest(BaseModel):
+    vehicle_reg: str
+    make: Optional[str] = None
+    model: Optional[str] = None
+    year: Optional[int] = None
+    mileage: Optional[int] = None
+    condition: str      # Excellent | Good | Fair | Poor
+    customer_name: Optional[str] = None
+    customer_email: Optional[EmailStr] = None
+
+class PartExchangeResponse(BaseModel):
+    estimated_value: float
+    condition: str
+    message: str
+
+class FinanceCalculatorRequest(BaseModel):
+    vehicle_price: float
+    deposit: float = 0
+    term_months: int = 48
+    annual_rate: float = 9.9  # APR
+
+class FinanceCalculatorResponse(BaseModel):
+    vehicle_price: float
+    deposit: float
+    loan_amount: float
+    term_months: int
+    annual_rate: float
+    monthly_payment: float
+    total_payable: float
+    total_interest: float
+
+class FinanceApplicationRequest(BaseModel):
+    customer_name: str
+    customer_email: EmailStr
+    customer_phone: Optional[str] = None
+    vehicle_id: int
+    vehicle_price: float
+    deposit: float = 0
+    term_months: int = 48
+    annual_rate: float = 9.9
+    employment_status: Optional[str] = None
+    annual_income: Optional[float] = None
+
+
+# ================================================================
+# routers/vehicles.py
+# ================================================================
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from database import get_db
+from models.vehicle import Vehicle, VehicleStatus
+from schemas.vehicle import VehicleCreate, VehicleResponse
+
+router = APIRouter(prefix="/api/v1/vehicles", tags=["Vehicles"])
+
+@router.get("/", response_model=List[VehicleResponse])
+def list_vehicles(
+    make:       Optional[str]   = Query(None),
+    body_type:  Optional[str]   = Query(None),
+    fuel_type:  Optional[str]   = Query(None),
+    min_price:  Optional[float] = Query(None),
+    max_price:  Optional[float] = Query(None),
+    max_mileage:Optional[int]   = Query(None),
+    is_new:     Optional[bool]  = Query(None),
+    dealership: Optional[str]   = Query(None),
+    skip: int = 0, limit: int = 20,
+    db: Session = Depends(get_db)
+):
+    query = db.query(Vehicle).filter(Vehicle.status == VehicleStatus.AVAILABLE)
+    if make:        query = query.filter(Vehicle.make.ilike(f"%{make}%"))
+    if body_type:   query = query.filter(Vehicle.body_type.ilike(f"%{body_type}%"))
+    if fuel_type:   query = query.filter(Vehicle.fuel_type == fuel_type)
+    if min_price:   query = query.filter(Vehicle.price >= min_price)
+    if max_price:   query = query.filter(Vehicle.price <= max_price)
+    if max_mileage: query = query.filter(Vehicle.mileage <= max_mileage)
+    if is_new is not None: query = query.filter(Vehicle.is_new == is_new)
+    if dealership:  query = query.filter(Vehicle.dealership.ilike(f"%{dealership}%"))
+    return query.offset(skip).limit(limit).all()
+
+@router.get("/{vehicle_id}", response_model=VehicleResponse)
+def get_vehicle(vehicle_id: int, db: Session = Depends(get_db)):
+    vehicle = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    return vehicle
+
+@router.post("/", response_model=VehicleResponse, status_code=201)
+def create_vehicle(data: VehicleCreate, db: Session = Depends(get_db)):
+    vehicle = Vehicle(**data.model_dump())
+    db.add(vehicle)
+    db.commit()
+    db.refresh(vehicle)
+    return vehicle
+
+@router.get("/search/")
+def search_vehicles(q: str = Query(..., min_length=2), db: Session = Depends(get_db)):
+    results = db.query(Vehicle).filter(
+        (Vehicle.make.ilike(f"%{q}%")) |
+        (Vehicle.model.ilike(f"%{q}%")) |
+        (Vehicle.variant.ilike(f"%{q}%"))
+    ).limit(10).all()
+    return results
+
+
+# ================================================================
+# routers/bookings.py
+# ================================================================
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from database import get_db
+from models.booking import TestDriveBooking, ServiceBooking
+from models.vehicle import Vehicle
+from schemas.booking import TestDriveRequest, ServiceBookingRequest, BookingResponse
+
+router = APIRouter(prefix="/api/v1/bookings", tags=["Bookings"])
+
+@router.post("/test-drive", response_model=BookingResponse, status_code=201)
+def book_test_drive(data: TestDriveRequest, db: Session = Depends(get_db)):
+    vehicle = db.query(Vehicle).filter(Vehicle.id == data.vehicle_id).first()
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    booking = TestDriveBooking(**data.model_dump())
+    db.add(booking)
+    db.commit()
+    db.refresh(booking)
+    return booking
+
+@router.post("/service", response_model=BookingResponse, status_code=201)
+def book_service(data: ServiceBookingRequest, db: Session = Depends(get_db)):
+    booking = ServiceBooking(**data.model_dump())
+    db.add(booking)
+    db.commit()
+    db.refresh(booking)
+    return booking
+
+@router.get("/test-drive/{booking_id}")
+def get_test_drive_booking(booking_id: int, db: Session = Depends(get_db)):
+    booking = db.query(TestDriveBooking).filter(
+        TestDriveBooking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return booking
+
+@router.get("/service/{booking_id}")
+def get_service_booking(booking_id: int, db: Session = Depends(get_db)):
+    booking = db.query(ServiceBooking).filter(
+        ServiceBooking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return booking
+
+
+# ================================================================
+# routers/finance.py
+# ================================================================
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from database import get_db
+from models.finance import PartExchangeValuation, FinanceApplication
+from schemas.finance import (
+    PartExchangeRequest, PartExchangeResponse,
+    FinanceCalculatorRequest, FinanceCalculatorResponse,
+    FinanceApplicationRequest
+)
+
+router = APIRouter(prefix="/api/v1/finance", tags=["Finance"])
+
+# Part-exchange valuation estimator (simplified)
+CONDITION_MULTIPLIER = {
+    "Excellent": 1.0, "Good": 0.85, "Fair": 0.70, "Poor": 0.50
+}
+BASE_VALUES = {
+    "Audi": 15000, "BMW": 16000, "Mercedes-Benz": 17000,
+    "Volkswagen": 12000, "Ford": 9000, "Vauxhall": 7000
+}
+
+@router.post("/part-exchange", response_model=PartExchangeResponse)
+def get_part_exchange_valuation(data: PartExchangeRequest, db: Session = Depends(get_db)):
+    base = BASE_VALUES.get(data.make, 10000)
+    age_factor = max(0.3, 1 - ((2025 - (data.year or 2020)) * 0.08))
+    mileage_factor = max(0.5, 1 - ((data.mileage or 30000) / 200000))
+    condition_factor = CONDITION_MULTIPLIER.get(data.condition, 0.75)
+    estimated = round(base * age_factor * mileage_factor * condition_factor, 2)
+
+    valuation = PartExchangeValuation(
+        customer_name=data.customer_name,
+        customer_email=data.customer_email,
+        vehicle_reg=data.vehicle_reg,
+        make=data.make, model=data.model,
+        year=data.year, mileage=data.mileage,
+        condition=data.condition, estimated_value=estimated
+    )
+    db.add(valuation)
+    db.commit()
+
+    return PartExchangeResponse(
+        estimated_value=estimated,
+        condition=data.condition,
+        message=f"Estimated part-exchange value: £{estimated:,.2f}. "
+                "A JCT600 adviser will contact you to confirm."
+    )
+
+@router.post("/calculator", response_model=FinanceCalculatorResponse)
+def finance_calculator(data: FinanceCalculatorRequest):
+    loan_amount = data.vehicle_price - data.deposit
+    monthly_rate = (data.annual_rate / 100) / 12
+    n = data.term_months
+    if monthly_rate > 0:
+        monthly = loan_amount * (monthly_rate * (1 + monthly_rate)**n) / \
+                  ((1 + monthly_rate)**n - 1)
+    else:
+        monthly = loan_amount / n
+    monthly = round(monthly, 2)
+    total_payable = round(monthly * n + data.deposit, 2)
+    total_interest = round(total_payable - data.vehicle_price, 2)
+    return FinanceCalculatorResponse(
+        vehicle_price=data.vehicle_price,
+        deposit=data.deposit,
+        loan_amount=round(loan_amount, 2),
+        term_months=n,
+        annual_rate=data.annual_rate,
+        monthly_payment=monthly,
+        total_payable=total_payable,
+        total_interest=total_interest
+    )
+
+@router.post("/apply", status_code=201)
+def submit_finance_application(data: FinanceApplicationRequest, db: Session = Depends(get_db)):
+    calc = finance_calculator(FinanceCalculatorRequest(
+        vehicle_price=data.vehicle_price,
+        deposit=data.deposit,
+        term_months=data.term_months,
+        annual_rate=data.annual_rate
+    ))
+    app = FinanceApplication(
+        **data.model_dump(),
+        monthly_payment=calc.monthly_payment
+    )
+    db.add(app)
+    db.commit()
+    db.refresh(app)
+    return {"id": app.id, "status": app.status,
+            "monthly_payment": calc.monthly_payment,
+            "message": "Finance application submitted successfully."}
+
+
+# ================================================================
+# main.py — JCT600 App Entry Point
+# ================================================================
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from database import Base, engine
+from routers import vehicles, bookings, finance
+
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(
+    title="JCT600 Car Dealership API",
+    description="Backend API for vehicle listings, bookings, and finance",
+    version="1.0.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(vehicles.router)
+app.include_router(bookings.router)
+app.include_router(finance.router)
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "app": "JCT600 API"}
+
+
+# ================================================================
+# tests/test_vehicles.py
+# ================================================================
+import pytest
+from fastapi.testclient import TestClient
+from main import app
+
+client = TestClient(app)
+
+def test_health_check():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "healthy"
+
+def test_list_vehicles():
+    response = client.get("/api/v1/vehicles/")
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+
+def test_finance_calculator():
+    response = client.post("/api/v1/finance/calculator", json={
+        "vehicle_price": 25000,
+        "deposit": 3000,
+        "term_months": 48,
+        "annual_rate": 9.9
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["loan_amount"] == 22000.0
+    assert data["monthly_payment"] > 0
+
+def test_part_exchange_valuation():
+    response = client.post("/api/v1/finance/part-exchange", json={
+        "vehicle_reg": "AB12CDE",
+        "make": "Audi",
+        "model": "A3",
+        "year": 2019,
+        "mileage": 45000,
+        "condition": "Good"
+    })
+    assert response.status_code == 200
+    assert response.json()["estimated_value"] > 0
+
+def test_book_service():
+    from datetime import datetime, timedelta
+    response = client.post("/api/v1/bookings/service", json={
+        "customer_name": "John Smith",
+        "customer_email": "john@example.com",
+        "customer_phone": "07700900000",
+        "vehicle_reg": "AB12CDE",
+        "vehicle_make": "Audi",
+        "vehicle_model": "A3",
+        "service_type": "Full Service",
+        "preferred_date": (datetime.utcnow() + timedelta(days=7)).isoformat(),
+        "dealership": "JCT600 Leeds"
+    })
+    assert response.status_code == 201
+
+
+# ================================================================
+# API ENDPOINT SUMMARY — JCT600
+# ================================================================
+# GET  /health                          → health check
+# GET  /api/v1/vehicles/               → list & filter vehicles
+# GET  /api/v1/vehicles/{id}           → vehicle detail
+# POST /api/v1/vehicles/               → add vehicle (admin)
+# GET  /api/v1/vehicles/search/?q=audi → search vehicles
+# POST /api/v1/bookings/test-drive     → book a test drive
+# POST /api/v1/bookings/service        → book a service/MOT/repair
+# GET  /api/v1/bookings/test-drive/{id}→ get test drive booking
+# GET  /api/v1/bookings/service/{id}   → get service booking
+# POST /api/v1/finance/part-exchange   → part-exchange valuation
+# POST /api/v1/finance/calculator      → monthly finance calculator
+# POST /api/v1/finance/apply           → submit finance application
