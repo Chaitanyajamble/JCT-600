@@ -1,0 +1,868 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+
+from routers import vehicles, chatbot, sales
+from config import settings
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("JCT 600 LLM Backend starting up...")
+    yield
+    print("JCT 600 LLM Backend shutting down...")
+
+
+app = FastAPI(
+    title="JCT 600 LLM API",
+    description="AI-powered vehicle recommendations, customer support, and sales lead generation",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register routers
+app.include_router(vehicles.router, prefix="/api/v1/vehicles", tags=["Vehicle Search & Recommendations"])
+app.include_router(chatbot.router, prefix="/api/v1/chatbot", tags=["Customer Support Chatbot"])
+app.include_router(sales.router, prefix="/api/v1/sales", tags=["Sales & Lead Generation"])
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "service": "JCT 600 LLM API"}
+
+# Configuration & Environment Settings for LLM
+
+from pydantic_settings import BaseSettings
+from typing import List
+
+
+class Settings(BaseSettings):
+    # OpenAI
+    OPENAI_API_KEY: str = "sk-your-openai-api-key"
+    OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_TEMPERATURE: float = 0.7
+    OPENAI_MAX_TOKENS: int = 1024
+
+    # App
+    APP_ENV: str = "development"
+    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "https://jct600.co.uk"]
+
+    # Rate limiting (requests per minute per IP)
+    RATE_LIMIT_RPM: int = 30
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+
+
+settings = Settings()
+from openai import AsyncOpenAI
+from typing import AsyncGenerator, Optional
+from config import settings
+import logging
+
+logger = logging.getLogger(__name__)
+
+_client: Optional[AsyncOpenAI] = None
+
+
+def get_openai_client() -> AsyncOpenAI:
+    """Return a singleton AsyncOpenAI client."""
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    return _client
+
+
+async def chat_completion(
+    system_prompt: str,
+    user_message: str,
+    conversation_history: list[dict] | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """
+    Single-turn or multi-turn chat completion.
+
+    Args:
+        system_prompt: Role/context instruction for the model.
+        user_message: The current user input.
+        conversation_history: Previous turns as [{"role": ..., "content": ...}].
+        temperature: Override default temperature.
+        max_tokens: Override default max tokens.
+
+    Returns:
+        The model's reply as a plain string.
+    """
+    client = get_openai_client()
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if conversation_history:
+        messages.extend(conversation_history)
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        response = await client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            messages=messages,
+            temperature=temperature or settings.OPENAI_TEMPERATURE,
+            max_tokens=max_tokens or settings.OPENAI_MAX_TOKENS,
+        )
+        return response.choices[0].message.content.strip()
+
+    except Exception as exc:
+        logger.error("OpenAI chat_completion error: %s", exc)
+        raise
+
+
+async def stream_chat_completion(
+    system_prompt: str,
+    user_message: str,
+    conversation_history: list[dict] | None = None,
+) -> AsyncGenerator[str, None]:
+    """
+    Streaming chat completion – yields text chunks as they arrive.
+    Use with FastAPI's StreamingResponse.
+    """
+    client = get_openai_client()
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if conversation_history:
+        messages.extend(conversation_history)
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        async with client.chat.completions.stream(
+            model=settings.OPENAI_MODEL,
+            messages=messages,
+            temperature=settings.OPENAI_TEMPERATURE,
+            max_tokens=settings.OPENAI_MAX_TOKENS,
+        ) as stream:
+            async for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield delta
+
+    except Exception as exc:
+        logger.error("OpenAI stream_chat_completion error: %s", exc)
+        raise
+mport json
+from services.llm_client import chat_completion
+
+
+async def get_vehicle_recommendations(
+    customer_query: str,
+    budget: str | None,
+    body_type: str | None,
+    fuel_type: str | None,
+    conversation_history: list[dict] | None = None,
+) -> dict:
+    """
+    Generate personalised vehicle recommendations based on customer preferences.
+    """
+    context_parts = [f"Customer query: {customer_query}"]
+    if budget:
+        context_parts.append(f"Budget: {budget}")
+    if body_type:
+        context_parts.append(f"Preferred body type: {body_type}")
+    if fuel_type:
+        context_parts.append(f"Fuel preference: {fuel_type}")
+
+    enriched_query = "\n".join(context_parts)
+
+    reply = await chat_completion(
+        system_prompt=VEHICLE_SYSTEM_PROMPT,
+        user_message=enriched_query,
+        conversation_history=conversation_history,
+    )
+
+    return {
+        "recommendation": reply,
+        "source": "JCT 600 AI Advisor",
+    }
+
+
+async def compare_vehicles(vehicles: list[str]) -> dict:
+    """
+    Produce an LLM-generated comparison of 2–4 vehicles.
+    """
+    vehicle_list = ", ".join(vehicles)
+    prompt = f"Please compare the following vehicles for a UK buyer: {vehicle_list}"
+    comparison = await chat_completion(
+        system_prompt=COMPARISON_SYSTEM_PROMPT,
+        user_message=prompt,
+        temperature=0.4, # lower temperature for factual comparison
+    )
+
+    return {"vehicles": vehicles, "comparison": comparison}
+
+
+async def generate_vehicle_description(vehicle_data: dict) -> str:
+    """
+    Generate a compelling, SEO-friendly vehicle listing description from raw data.
+    """
+    system = (
+        "You are a copywriter for JCT 600. Given structured vehicle data, "
+        "write an engaging, factual 150-word listing description in British English. "
+        "Highlight key selling points without exaggerating."
+    )
+    user_msg = f"Vehicle data:\n{json.dumps(vehicle_data, indent=2)}"
+
+    return await chat_completion(
+        system_prompt=system,
+        user_message=user_msg,
+        temperature=0.6,
+        max_tokens=300,
+    )
+
+
+# ── routers/vehicles.py ───────────────────────────────────────────────────────
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+router = APIRouter()
+
+
+# ── Request / Response Models ─────────────────────────────────────────────────
+
+class VehicleRecommendationRequest(BaseModel):
+    query: str = Field(..., min_length=5, example="I need a family SUV for long motorway trips")
+    budget: str | None = Field(None, example="£30,000–£40,000")
+    body_type: str | None = Field(None, example="SUV")
+    fuel_type: str | None = Field(None, example="Hybrid")
+    conversation_history: list[dict] | None = None
+
+
+class VehicleRecommendationResponse(BaseModel):
+    recommendation: str
+    source: str
+
+
+class VehicleCompareRequest(BaseModel):
+    vehicles: list[str] = Field(..., min_length=2, max_length=4,
+                                example=["BMW X5", "Audi Q7"])
+
+
+class VehicleCompareResponse(BaseModel):
+    vehicles: list[str]
+    comparison: str
+
+
+class VehicleDescriptionRequest(BaseModel):
+    vehicle_data: dict = Field(..., example={
+        "make": "BMW", "model": "3 Series", "year": 2023,
+        "mileage": 12000, "fuel": "Petrol", "transmission": "Automatic",
+        "colour": "Alpine White", "price": 28995
+    })
+
+
+class VehicleDescriptionResponse(BaseModel):
+    description: str
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.post("/recommend", response_model=VehicleRecommendationResponse,
+             summary="Get AI-powered vehicle recommendations")
+async def recommend_vehicle(request: VehicleRecommendationRequest):
+    """
+    Accepts a customer's natural-language query plus optional filters and returns
+    personalised vehicle recommendations from JCT 600's AI advisor.
+    """
+    try:
+        result = await get_vehicle_recommendations(
+            customer_query=request.query,
+            budget=request.budget,
+            body_type=request.body_type,
+            fuel_type=request.fuel_type,
+            conversation_history=request.conversation_history,
+        )
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/compare", response_model=VehicleCompareResponse,
+             summary="Compare 2–4 vehicles side by side")
+async def compare_vehicles_endpoint(request: VehicleCompareRequest):
+    """
+    Returns a structured, AI-generated comparison of the requested vehicles.
+    """
+    try:
+        return await compare_vehicles(request.vehicles)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/description", response_model=VehicleDescriptionResponse,
+             summary="Generate a listing description from vehicle data")
+async def generate_description(request: VehicleDescriptionRequest):
+    """
+    Converts structured vehicle data into a consumer-ready listing description.
+    """
+    try:
+        description = await generate_vehicle_description(request.vehicle_data)
+        return {"description": description}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+rom services.llm_client import chat_completion, stream_chat_completion
+from typing import AsyncGenerator
+
+
+async def get_support_reply(
+    user_message: str,
+    conversation_history: list[dict] | None = None,
+) -> str:
+    return await chat_completion(
+        system_prompt=SUPPORT_SYSTEM_PROMPT,
+        user_message=user_message,
+        conversation_history=conversation_history,
+    )
+
+
+async def stream_support_reply(
+    user_message: str,
+    conversation_history: list[dict] | None = None,
+) -> AsyncGenerator[str, None]:
+    async for chunk in stream_chat_completion(
+        system_prompt=SUPPORT_SYSTEM_PROMPT,
+        user_message=user_message,
+        conversation_history=conversation_history,
+    ):
+        yield chunk
+
+
+async def classify_support_intent(user_message: str) -> dict:
+    """
+    Classify customer intent to route to the correct department.
+    Returns a JSON-like dict with intent label and confidence.
+    """
+    import json
+
+    system = """
+    Classify the following customer message into exactly ONE of these intents:
+    - service_booking
+    - warranty_enquiry
+    - finance_enquiry
+    - part_exchange
+    - complaint
+    - general_information
+    - test_drive_booking
+    - other
+
+    Respond ONLY with valid JSON in this format (no extra text):
+    {"intent": "<label>", "confidence": <0.0–1.0>, "summary": "<one sentence>"}
+    """
+
+    raw = await chat_completion(
+        system_prompt=system,
+        user_message=user_message,
+        temperature=0.2,
+        max_tokens=120,
+    )
+
+    try:
+        clean = raw.strip().lstrip("```json").rstrip("```").strip()
+        return json.loads(clean)
+    except json.JSONDecodeError:
+        return {"intent": "other", "confidence": 0.5, "summary": raw}
+
+
+# ── routers/chatbot.py ────────────────────────────────────────────────────────
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+router = APIRouter()
+
+
+# ── Request / Response Models ─────────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    role: str = Field(..., example="user")
+    content: str = Field(..., example="I'd like to book my car in for a service.")
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, example="What are your opening hours?")
+    conversation_history: list[ChatMessage] | None = None
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    assistant: str = "Jamie – JCT 600 Support"
+
+
+class IntentRequest(BaseModel):
+    message: str = Field(..., min_length=3, example="I want to trade in my old car")
+
+
+class IntentResponse(BaseModel):
+    intent: str
+    confidence: float
+    summary: str
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.post("/chat", response_model=ChatResponse,
+             summary="Send a message to the JCT 600 support chatbot")
+async def chat(request: ChatRequest):
+    """
+    Multi-turn customer support chat. Pass the full conversation_history
+    on each request to maintain context.
+    """
+    try:
+        history = (
+            [msg.model_dump() for msg in request.conversation_history]
+            if request.conversation_history else None
+        )
+        reply = await get_support_reply(request.message, history)
+        return {"reply": reply, "assistant": "Jamie – JCT 600 Support"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/chat/stream", summary="Streaming chat response (Server-Sent Events)")
+async def chat_stream(request: ChatRequest):
+    """
+    Same as /chat but streams the reply token-by-token using Server-Sent Events.
+    Ideal for real-time typing-indicator UX.
+    """
+    try:
+        history = (
+            [msg.model_dump() for msg in request.conversation_history]
+            if request.conversation_history else None
+        )
+
+        async def sse_generator():
+            async for chunk in stream_support_reply(request.message, history):
+                yield f"data: {chunk}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(sse_generator(), media_type="text/event-stream")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/intent", response_model=IntentResponse,
+             summary="Classify the intent of a customer message")
+async def classify_intent(request: IntentRequest):
+    """
+    Classifies the customer's message intent for routing to the correct
+    JCT 600 department or workflow.
+    """
+    try:
+        result = await classify_support_intent(request.message)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+rom services.llm_client import chat_completion, stream_chat_completion
+from typing import AsyncGenerator
+
+
+async def get_support_reply(
+    user_message: str,
+    conversation_history: list[dict] | None = None,
+) -> str:
+    return await chat_completion(
+        system_prompt=SUPPORT_SYSTEM_PROMPT,
+        user_message=user_message,
+        conversation_history=conversation_history,
+    )
+
+
+async def stream_support_reply(
+    user_message: str,
+    conversation_history: list[dict] | None = None,
+) -> AsyncGenerator[str, None]:
+    async for chunk in stream_chat_completion(
+        system_prompt=SUPPORT_SYSTEM_PROMPT,
+        user_message=user_message,
+        conversation_history=conversation_history,
+    ):
+        yield chunk
+
+
+async def classify_support_intent(user_message: str) -> dict:
+    """
+    Classify customer intent to route to the correct department.
+    Returns a JSON-like dict with intent label and confidence.
+    """
+    import json
+
+    system = """
+    Classify the following customer message into exactly ONE of these intents:
+    - service_booking
+    - warranty_enquiry
+    - finance_enquiry
+    - part_exchange
+    - complaint
+    - general_information
+    - test_drive_booking
+    - other
+
+    Respond ONLY with valid JSON in this format (no extra text):
+    {"intent": "<label>", "confidence": <0.0–1.0>, "summary": "<one sentence>"}
+    """
+
+    raw = await chat_completion(
+        system_prompt=system,
+        user_message=user_message,
+        temperature=0.2,
+        max_tokens=120,
+    )
+
+    try:
+        clean = raw.strip().lstrip("```json").rstrip("```").strip()
+        return json.loads(clean)
+    except json.JSONDecodeError:
+        return {"intent": "other", "confidence": 0.5, "summary": raw}
+
+
+# ── routers/chatbot.py ────────────────────────────────────────────────────────
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+router = APIRouter()
+
+
+# ── Request / Response Models ─────────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    role: str = Field(..., example="user")
+    content: str = Field(..., example="I'd like to book my car in for a service.")
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, example="What are your opening hours?")
+    conversation_history: list[ChatMessage] | None = None
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    assistant: str = "Jamie – JCT 600 Support"
+
+
+class IntentRequest(BaseModel):
+    message: str = Field(..., min_length=3, example="I want to trade in my old car")
+
+
+class IntentResponse(BaseModel):
+    intent: str
+    confidence: float
+    summary: str
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.post("/chat", response_model=ChatResponse,
+             summary="Send a message to the JCT 600 support chatbot")
+async def chat(request: ChatRequest):
+    """
+    Multi-turn customer support chat. Pass the full conversation_history
+    on each request to maintain context.
+    """
+    try:
+        history = (
+            [msg.model_dump() for msg in request.conversation_history]
+            if request.conversation_history else None
+        )
+        reply = await get_support_reply(request.message, history)
+        return {"reply": reply, "assistant": "Jamie – JCT 600 Support"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/chat/stream", summary="Streaming chat response (Server-Sent Events)")
+async def chat_stream(request: ChatRequest):
+    """
+    Same as /chat but streams the reply token-by-token using Server-Sent Events.
+    Ideal for real-time typing-indicator UX.
+    """
+    try:
+        history = (
+            [msg.model_dump() for msg in request.conversation_history]
+            if request.conversation_history else None
+        )
+
+        async def sse_generator():
+            async for chunk in stream_support_reply(request.message, history):
+                yield f"data: {chunk}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(sse_generator(), media_type="text/event-stream")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/intent", response_model=IntentResponse,
+             summary="Classify the intent of a customer message")
+async def classify_intent(request: IntentRequest):
+    """
+    Classifies the customer's message intent for routing to the correct
+    JCT 600 department or workflow.
+    """
+    try:
+        result = await classify_support_intent(request.message)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+mport json
+from services.llm_client import chat_completion
+
+
+LEAD_SCORING_SYSTEM = """
+You are a sales intelligence system for JCT 600 (UK automotive retail).
+Analyse the provided lead data and score the lead from 1–10 based on:
+- Buying intent signals (urgency, specific vehicle interest, budget clarity)
+- Engagement level (number of touchpoints, recency)
+- Financial readiness (finance enquiry, part-exchange mention)
+- Demographic fit (UK-based, age of current vehicle)
+
+Respond ONLY with valid JSON (no extra text):
+{
+  "score": <1–10>,
+  "grade": "<Hot|Warm|Cold>",
+  "key_signals": ["<signal1>", "<signal2>"],
+  "recommended_action": "<one sentence>",
+  "next_best_step": "<call|email|whatsapp|demo_booking>"
+}
+"""
+
+FOLLOW_UP_EMAIL_SYSTEM = """
+You are a senior sales executive at JCT 600, a premium UK automotive retailer.
+Draft a personalised, professional follow-up email to a prospective customer.
+Guidelines:
+- Warm, not pushy; consultative tone
+- Reference the specific vehicle(s) the customer showed interest in
+- Include a clear, single call-to-action (book a test drive / call back / online reservation)
+- Keep to 150–200 words
+- Sign off as "[Sales Advisor Name], JCT 600"
+- British English throughout
+"""
+
+OBJECTION_SYSTEM = """
+You are an expert automotive sales coach at JCT 600.
+Given a customer objection, provide a concise, empathetic response strategy for the
+sales advisor. Include:
+1. Acknowledge the objection
+2. Reframe or address the concern with facts/benefits
+3. Bridge to the next step
+
+Keep advice to 3 bullet points maximum. British English.
+"""
+
+SALES_SCRIPT_SYSTEM = """
+You are a sales enablement specialist at JCT 600.
+Generate a structured call/conversation script for a JCT 600 sales advisor approaching
+a specific lead. Include:
+- Opening (rapport building)
+- Discovery questions (needs analysis)
+- Value proposition tailored to their profile
+- Handling common objections
+- Close / next-step ask
+
+Format with clear section headers. British English. Keep it practical and natural.
+"""
+
+
+async def score_lead(lead_data: dict) -> dict:
+    raw = await chat_completion(
+        system_prompt=LEAD_SCORING_SYSTEM,
+        user_message=f"Lead data:\n{json.dumps(lead_data, indent=2)}",
+        temperature=0.3,
+        max_tokens=300,
+    )
+    try:
+        clean = raw.strip().lstrip("```json").rstrip("```").strip()
+        return json.loads(clean)
+    except json.JSONDecodeError:
+        return {"raw_response": raw}
+
+
+async def draft_follow_up_email(
+    customer_name: str,
+    vehicle_interest: str,
+    last_interaction: str,
+    advisor_name: str = "Your JCT 600 Advisor",
+) -> str:
+    prompt = (
+        f"Customer: {customer_name}\n"
+        f"Vehicle interest: {vehicle_interest}\n"
+        f"Last interaction summary: {last_interaction}\n"
+        f"Advisor name: {advisor_name}"
+    )
+    return await chat_completion(
+        system_prompt=FOLLOW_UP_EMAIL_SYSTEM,
+        user_message=prompt,
+        temperature=0.7,
+        max_tokens=400,
+    )
+
+
+async def handle_objection(objection: str, vehicle_context: str | None = None) -> str:
+    prompt = f"Customer objection: {objection}"
+    if vehicle_context:
+        prompt += f"\nVehicle context: {vehicle_context}"
+    return await chat_completion(
+        system_prompt=OBJECTION_SYSTEM,
+        user_message=prompt,
+        temperature=0.5,
+        max_tokens=300,
+    )
+
+
+async def generate_sales_script(lead_profile: dict) -> str:
+    prompt = f"Lead profile:\n{json.dumps(lead_profile, indent=2)}"
+    return await chat_completion(
+        system_prompt=SALES_SCRIPT_SYSTEM,
+        user_message=prompt,
+        temperature=0.6,
+        max_tokens=700,
+    )
+
+
+# ── routers/sales.py ──────────────────────────────────────────────────────────
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+router = APIRouter()
+
+
+# ── Request / Response Models ─────────────────────────────────────────────────
+
+class LeadScoringRequest(BaseModel):
+    lead_data: dict = Field(..., example={
+        "name": "James Wilson",
+        "email": "james.wilson@email.com",
+        "vehicle_interest": "BMW 5 Series",
+        "budget": "£45,000",
+        "finance_enquiry": True,
+        "part_exchange": "2020 Ford Focus",
+        "touchpoints": 3,
+        "days_since_last_contact": 2,
+        "source": "website_enquiry",
+    })
+
+
+class LeadScoringResponse(BaseModel):
+    score: int
+    grade: str
+    key_signals: list[str]
+    recommended_action: str
+    next_best_step: str
+
+
+class FollowUpEmailRequest(BaseModel):
+    customer_name: str = Field(..., example="Sarah Thompson")
+    vehicle_interest: str = Field(..., example="Audi Q5 S line")
+    last_interaction: str = Field(..., example="Customer visited showroom, liked the Q5 but wants to think about finance.")
+    advisor_name: str = Field(default="Your JCT 600 Advisor", example="Michael Clarke")
+
+
+class FollowUpEmailResponse(BaseModel):
+    email_draft: str
+
+
+class ObjectionRequest(BaseModel):
+    objection: str = Field(..., example="The monthly payments are too high for me.")
+    vehicle_context: str | None = Field(None, example="Mercedes GLC, £650/month PCP")
+
+
+class ObjectionResponse(BaseModel):
+    strategy: str
+
+
+class SalesScriptRequest(BaseModel):
+    lead_profile: dict = Field(..., example={
+        "name": "David Patel",
+        "age_group": "35–45",
+        "current_vehicle": "VW Golf 2019",
+        "interest": "Electric vehicle, possibly Tesla Model 3 or BMW i4",
+        "budget": "£500/month",
+        "motivation": "Reduce fuel costs, company car tax benefit",
+        "concerns": "Range anxiety, charging infrastructure",
+    })
+
+
+class SalesScriptResponse(BaseModel):
+    script: str
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.post("/lead/score", response_model=LeadScoringResponse,
+             summary="AI lead scoring and prioritisation")
+async def score_lead_endpoint(request: LeadScoringRequest):
+    """
+    Scores an inbound or CRM lead from 1–10 with a Hot/Warm/Cold grade and
+    recommended next action for the JCT 600 sales team.
+    """
+    try:
+        result = await score_lead(request.lead_data)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/lead/follow-up-email", response_model=FollowUpEmailResponse,
+             summary="Draft a personalised follow-up email")
+async def follow_up_email(request: FollowUpEmailRequest):
+    """
+    Generates a personalised, ready-to-send follow-up email for a specific lead
+    based on their vehicle interest and last interaction.
+    """
+    try:
+        draft = await draft_follow_up_email(
+            customer_name=request.customer_name,
+            vehicle_interest=request.vehicle_interest,
+            last_interaction=request.last_interaction,
+            advisor_name=request.advisor_name,
+        )
+        return {"email_draft": draft}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/lead/objection-handler", response_model=ObjectionResponse,
+             summary="Get a strategy to handle a customer objection")
+async def objection_handler(request: ObjectionRequest):
+    """
+    Provides the sales advisor with an empathetic, structured strategy to address
+    a specific customer objection.
+    """
+    try:
+        strategy = await handle_objection(request.objection, request.vehicle_context)
+        return {"strategy": strategy}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/lead/sales-script", response_model=SalesScriptResponse,
+             summary="Generate a tailored sales conversation script")
+async def sales_script(request: SalesScriptRequest):
+    """
+    Creates a structured call/visit script tailored to the lead's profile,
+    interests, and known objections.
+    """
+    try:
+        script = await generate_sales_script(request.lead_profile)
+        return {"script": script}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
